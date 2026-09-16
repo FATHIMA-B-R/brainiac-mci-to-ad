@@ -1,0 +1,28 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Large weights and checkpoints (exceed GitHub 100MB limit)
+*.ckpt
+*.pt
+*.pth
+*.nii
+*.nii.gz
+
+# Results, logs, and outputs
+results/
+inference/model_output/
+wandb/
+lightning_logs/
