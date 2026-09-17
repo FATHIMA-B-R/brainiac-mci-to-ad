@@ -3,6 +3,8 @@ import argparse
 import hashlib
 import json
 import math
+import os
+from itertools import combinations
 from pathlib import Path
 import shlex
 import subprocess
@@ -11,6 +13,14 @@ import sys
 SPACE = {'lr': [1e-5, 3e-4], 'weight_decay': [1e-4, .1],
          'hidden_dim': [32, 64, 128, 256], 'drop_rate': [0., .1, .2, .3, .5],
          'head_depth': [1, 2, 3], 'head_norm': [0, 1], 'batch_size': [4, 8, 16]}
+
+
+# Explicit MLP layouts avoid redundant shape/depth combinations in the search.
+TAPERED = [list(c) for depth in (2, 3)
+           for c in combinations((256, 128, 64, 32), depth)]
+SPACE['mlp_dims'] = [','.join(map(str, [w] * d))
+                     for w in SPACE['hidden_dim'] for d in SPACE['head_depth']]
+SPACE['mlp_dims'] += [','.join(map(str, dims)) for dims in TAPERED]
 
 
 def initial_candidates():
@@ -26,6 +36,12 @@ def initial_candidates():
     candidates.extend([dict(base, weight_decay=.001, drop_rate=0.),
                        dict(base, weight_decay=.1, drop_rate=.3),
                        dict(base, head_norm=1), dict(base, batch_size=8)])
+    for candidate in candidates:
+        candidate['mlp_dims'] = ','.join([str(candidate['hidden_dim'])] * candidate.pop('head_depth'))
+    for dims in TAPERED:
+        candidates.append(dict(lr=1e-4, weight_decay=.05, hidden_dim=dims[0],
+                               drop_rate=.1, head_norm=0, batch_size=4,
+                               mlp_dims=','.join(map(str, dims))))
     return candidates
 
 
@@ -70,13 +86,18 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     for name in ('tokens', 'split', 'neurovfm-root', 'output'):
         p.add_argument('--'+name, type=Path, required=True)
-    p.add_argument('--trials', type=int, default=32, help='Total trial budget, including previous and failed trials')
+    p.add_argument('--tapered-only', action='store_true', help='Run only the 10 new decreasing-width configurations, without repeating old trials')
+    p.add_argument('--trials', type=int, default=None, help='Total trial budget, including previous and failed trials')
     p.add_argument('--epochs', type=int, default=30)
     p.add_argument('--patience', type=int, default=10)
     p.add_argument('--split-seed', type=int, default=0)
     p.add_argument('--search-seed', type=int, default=42)
     p.add_argument('--device', default=None)
     args = p.parse_args()
+    if args.trials is None:
+        args.trials = 10 if args.tapered_only else 32
+    if args.tapered_only and args.trials > 10:
+        p.error('--tapered-only allows at most 10 trials, to avoid additional/repeated configurations')
     if args.trials < 1 or args.epochs < 1 or args.patience < 0:
         p.error('Trials/epochs must be positive; patience must be nonnegative')
     import optuna
@@ -86,7 +107,7 @@ def main():
                Path(__file__).with_name('train_brainiac_attentive.py'),
                Path(__file__).with_name('attentive_search_adapter.py'), Path(__file__)]
     fingerprint = dict(inputs={str(f.resolve()): digest(f) for f in sources},
-                       space=SPACE, epochs=args.epochs, patience=args.patience,
+                       space=SPACE, tapered_only=args.tapered_only, epochs=args.epochs, patience=args.patience,
                        split_seed=args.split_seed, search_seed=args.search_seed,
                        device=args.device, python=sys.version, optuna=optuna.__version__)
     args.output.mkdir(parents=True, exist_ok=True)
@@ -103,7 +124,8 @@ def main():
         sampler=optuna.samplers.TPESampler(seed=args.search_seed, n_startup_trials=5),
         pruner=optuna.pruners.NopPruner())
     if not study.trials:
-        for parameters in initial_candidates():
+        candidates = initial_candidates()[-10:] if args.tapered_only else initial_candidates()
+        for parameters in candidates:
             study.enqueue_trial(parameters)
     # Resume completed trials, but never silently treat an interrupted training run as complete.
     if any(t.state == optuna.trial.TrialState.RUNNING for t in study.trials):
@@ -127,12 +149,13 @@ def main():
                       weight_decay=trial.suggest_float('weight_decay', *SPACE['weight_decay'], log=True),
                       hidden_dim=trial.suggest_categorical('hidden_dim', SPACE['hidden_dim']),
                       drop_rate=trial.suggest_categorical('drop_rate', SPACE['drop_rate']),
-                      head_depth=trial.suggest_categorical('head_depth', SPACE['head_depth']),
+                      mlp_dims=trial.suggest_categorical('mlp_dims', SPACE['mlp_dims']),
                       head_norm=trial.suggest_categorical('head_norm', SPACE['head_norm']),
                       batch_size=trial.suggest_categorical('batch_size', SPACE['batch_size']))
         out = args.output/f'trial_{trial.number:04d}'
         with (args.output/f'trial_{trial.number:04d}.log').open('w') as log:
-            subprocess.run(command(args, params, out), stdout=log, stderr=subprocess.STDOUT, check=True)
+            subprocess.run(command(args, params, out), stdout=log, stderr=subprocess.STDOUT,
+                           env=dict(os.environ, PYTHONUNBUFFERED='1'), check=True)
         summary = out/'seed_42/dev_summary.json'
         value = score_summary(summary)
         diagnostics = json.loads(summary.read_text())

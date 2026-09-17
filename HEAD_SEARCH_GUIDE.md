@@ -112,3 +112,39 @@ training seeds with a predeclared selection rule before test evaluation. The
 current implementation fixes training seed 42; it does not automate multi-seed
 confirmation or nested CV. Cross-validation used repeatedly for selection is not
 an unbiased generalization estimate. Already observed test results remain exploratory.
+
+## Next run: only new tapered heads
+
+Run this AFTER the previous search finishes and after transferring these updates.
+Do not replace scripts while an older search is launching subsequent trials.
+Use a new output directory; old studies remain untouched.
+
+```bash
+python -u scripts/search_attentive_head.py \
+  --tokens comparison_splits/brainiac_tokens.pt \
+  --split comparison_splits/splits_88_132_split21.csv \
+  --neurovfm-root /workspace/ad_detection/neurovfm-mci-ad \
+  --output results/head_search_tapered/88_132_split21 \
+  --split-seed 21 --tapered-only --device cuda
+```
+
+This queues EXACTLY ten new configurations, without the old baseline/equal-width
+trials or adaptive suggestions. Total budget defaults to 10 and cannot exceed 10.
+Two hidden layers: 256,128; 256,64; 256,32; 128,64; 128,32; 64,32.
+Three hidden layers: 256,128,64; 256,128,32; 256,64,32; 128,64,32.
+These exhaust strictly decreasing sequences of length 2/3 from 32/64/128/256.
+
+Each uses lr=1e-4, weight_decay=.05, dropout=.1, normalization off, training
+batch size 4, and attention width equal to its first hidden width. The MLP has a
+final one-unit output beyond the listed hidden layers. Existing head-depth syntax
+remains supported; explicit --mlp-dims overrides it. The adaptive combined search
+also supports explicit layouts, with attention width a separate parameter.
+
+Ten trials = 80 fold fits, with frozen tokens, existing fold assignments, seed 42,
+30-epoch limit, patience 10. No test evaluation occurs. Child logs now flush
+without waiting for their output buffer to fill. Completed trials in this NEW
+study are skipped on rerun; interrupted RUNNING trials retain the earlier recovery
+limitation. best_params.json selects among these ten only, not the previous study.
+Compare its development results with the previous study before choosing finalists.
+Existing run_selected_final.sh would evaluate this study's winner, not a combined
+winner; do not run it until the cross-study development selection is complete.

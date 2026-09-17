@@ -57,6 +57,8 @@ def main():
     p.add_argument('--patience', type=int, default=10)
     p.add_argument('--grad-clip', type=float, default=1.)
     p.add_argument('--device', default=None)
+    from attentive_search_adapter import parse_mlp_dims
+    p.add_argument('--mlp-dims', type=parse_mlp_dims, default=None, help='Explicit hidden widths; overrides head-depth')
     p.add_argument('--head-depth', type=int, choices=(1, 2, 3), default=1)
     p.add_argument('--head-norm', type=int, choices=(0, 1), default=0)
     p.add_argument('--batch-size', type=int, choices=(4, 8, 16), default=4)
@@ -90,6 +92,8 @@ def main():
            '--mcinc-mode', 'all', '--num-folds', '8', '--seeds', '42']
     for key in ('split_seed','epochs','lr','weight_decay','hidden_dim','drop_rate','patience','grad_clip'):
         cmd += ['--'+key.replace('_','-'), str(getattr(args,key))]
+    if args.mlp_dims:
+        cmd += ['--mlp-dims', ','.join(map(str, args.mlp_dims))]
     if args.device:
         cmd += ['--device', args.device]
     if args.dev_only:

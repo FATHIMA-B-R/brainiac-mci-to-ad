@@ -38,10 +38,10 @@ class SearchTests(unittest.TestCase):
 
     def test_initial_architecture_coverage(self):
         candidates = search.initial_candidates()
-        self.assertEqual(len(candidates), 17)
-        covered = {(r['hidden_dim'],r['head_depth']) for r in candidates}
+        self.assertEqual(len(candidates), 27)
+        covered = {(r['hidden_dim'],len(r['mlp_dims'].split(','))) for r in candidates[:17]}
         self.assertEqual(covered, {(w,d) for w in (32,64,128,256) for d in (1,2,3)})
-        self.assertEqual(candidates[0]['head_depth'],1)
+        self.assertEqual(candidates[0]['mlp_dims'],'256')
         self.assertEqual(candidates[0]['hidden_dim'],256)
         self.assertEqual(candidates[0]['head_norm'],0)
         self.assertEqual(candidates[0]['batch_size'],4)
@@ -67,6 +67,35 @@ def main():
             subprocess.run([sys.executable,str(adapter),'--trainer-source',str(trainer),
                             '--head-depth','3','--head-norm','1','--batch-size','16',
                             '--dev-only'],check=True,capture_output=True)
+
+    def test_tapered_candidates_are_new_and_complete(self):
+        candidates = search.initial_candidates()
+        new = candidates[-10:]
+        expected = {'256,128', '256,64', '256,32', '128,64', '128,32', '64,32',
+                    '256,128,64', '256,128,32', '256,64,32', '128,64,32'}
+        self.assertEqual({r['mlp_dims'] for r in new}, expected)
+        self.assertFalse(expected & {r['mlp_dims'] for r in candidates[:-10]})
+        for r in new:
+            self.assertEqual(r['hidden_dim'],int(r['mlp_dims'].split(',')[0]))
+
+    def test_tapered_forwarding(self):
+        import subprocess
+        import sys
+        with tempfile.TemporaryDirectory() as d:
+            trainer=Path(d)/'trainer.py'
+            trainer.write_text("""
+def ClassifyThenAggregate(**kwargs): return kwargs
+def DataLoader(**kwargs): return kwargs
+def main():
+    head=ClassifyThenAggregate(hidden_dim=256)
+    assert head['mlp_hidden_dims']==[128,64,32]
+    assert head['hidden_dim']==256
+""")
+            cmd=[sys.executable,str(path.with_name('attentive_search_adapter.py')),
+                 '--trainer-source',str(trainer),'--mlp-dims','128,64,32']
+            subprocess.run(cmd,check=True,capture_output=True)
+            cmd[-1]='32,64'
+            self.assertNotEqual(subprocess.run(cmd,capture_output=True).returncode,0)
 
     def test_content_hash_changes(self):
         with tempfile.TemporaryDirectory() as d:
