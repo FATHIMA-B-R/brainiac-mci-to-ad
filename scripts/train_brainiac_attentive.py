@@ -57,6 +57,9 @@ def main():
     p.add_argument('--patience', type=int, default=10)
     p.add_argument('--grad-clip', type=float, default=1.)
     p.add_argument('--device', default=None)
+    p.add_argument('--head-depth', type=int, choices=(1, 2, 3), default=1)
+    p.add_argument('--head-norm', type=int, choices=(0, 1), default=0)
+    p.add_argument('--batch-size', type=int, choices=(4, 8, 16), default=4)
     p.add_argument('--dev-only', action='store_true')
     args = p.parse_args()
     os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
@@ -81,7 +84,9 @@ def main():
         trainer_sha256=hashlib.sha256(trainer.read_bytes()).hexdigest(),
         split_sha256=hashlib.sha256(args.split.read_bytes()).hexdigest(),
         token_source=str(args.tokens.resolve()), settings={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()}), indent=2))
-    cmd = [sys.executable, str(trainer), '--embeddings', str(packed), '--output-dir', str(args.output.resolve()),
+    cmd = [sys.executable, str(Path(__file__).with_name('attentive_search_adapter.py').resolve()),
+           '--trainer-source', str(trainer), '--head-depth', str(args.head_depth),
+           '--head-norm', str(args.head_norm), '--batch-size', str(args.batch_size), '--embeddings', str(packed), '--output-dir', str(args.output.resolve()),
            '--mcinc-mode', 'all', '--num-folds', '8', '--seeds', '42']
     for key in ('split_seed','epochs','lr','weight_decay','hidden_dim','drop_rate','patience','grad_clip'):
         cmd += ['--'+key.replace('_','-'), str(getattr(args,key))]

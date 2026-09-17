@@ -1,0 +1,2 @@
+# Add to an environment that already runs the attentive probe.
+optuna>=4.0,<6
