@@ -10,7 +10,10 @@ import shlex
 import subprocess
 import sys
 
-SPACE = {'lr': [1e-5, 3e-4], 'weight_decay': [1e-4, .1],
+# Match the original NeuroVFM attentive-probe CLI defaults, not optimizer-library defaults.
+DEFAULT_LR = 3e-4
+DEFAULT_WEIGHT_DECAY = .05
+SPACE = {'lr': [DEFAULT_LR], 'weight_decay': [DEFAULT_WEIGHT_DECAY],
          'hidden_dim': [32, 64, 128, 256], 'drop_rate': [0., .1, .2, .3, .5],
          'head_depth': [1, 2, 3], 'head_norm': [0, 1], 'batch_size': [4, 8, 16]}
 
@@ -25,24 +28,33 @@ SPACE['mlp_dims'] += [','.join(map(str, dims)) for dims in TAPERED]
 
 def initial_candidates():
     # Baseline first, then all 12 width/depth combinations under one fixed setup.
-    baseline = dict(lr=3e-4, weight_decay=.05, hidden_dim=256, drop_rate=.1,
+    baseline = dict(lr=DEFAULT_LR, weight_decay=DEFAULT_WEIGHT_DECAY, hidden_dim=256, drop_rate=.1,
                     head_depth=1, head_norm=0, batch_size=4)
     candidates = [baseline]
     for width in SPACE['hidden_dim']:
         for depth in SPACE['head_depth']:
-            candidates.append(dict(baseline, lr=1e-4, hidden_dim=width, head_depth=depth))
+            candidates.append(dict(baseline, hidden_dim=width, head_depth=depth))
     # Isolate weaker/stronger regularization, normalization and batching on a small head.
-    base = dict(baseline, lr=1e-4, hidden_dim=64)
-    candidates.extend([dict(base, weight_decay=.001, drop_rate=0.),
-                       dict(base, weight_decay=.1, drop_rate=.3),
+    base = dict(baseline, hidden_dim=64)
+    candidates.extend([dict(base, drop_rate=0.),
+                       dict(base, drop_rate=.3),
                        dict(base, head_norm=1), dict(base, batch_size=8)])
     for candidate in candidates:
         candidate['mlp_dims'] = ','.join([str(candidate['hidden_dim'])] * candidate.pop('head_depth'))
     for dims in TAPERED:
-        candidates.append(dict(lr=1e-4, weight_decay=.05, hidden_dim=dims[0],
+        candidates.append(dict(lr=DEFAULT_LR, weight_decay=DEFAULT_WEIGHT_DECAY, hidden_dim=dims[0],
                                drop_rate=.1, head_norm=0, batch_size=4,
                                mlp_dims=','.join(map(str, dims))))
     return candidates
+
+
+def tapered_candidates(dropouts):
+    if not dropouts or any(d not in SPACE['drop_rate'] for d in dropouts):
+        raise ValueError("Tapered dropouts must be selected from 0, 0.1, 0.2, 0.3, 0.5")
+    # Deduplicate while retaining requested order; each architecture/dropout runs once.
+    return [dict(candidate, drop_rate=drop)
+            for drop in dict.fromkeys(dropouts)
+            for candidate in initial_candidates()[-10:]]
 
 
 def digest(path):
@@ -86,7 +98,9 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     for name in ('tokens', 'split', 'neurovfm-root', 'output'):
         p.add_argument('--'+name, type=Path, required=True)
-    p.add_argument('--tapered-only', action='store_true', help='Run only the 10 new decreasing-width configurations, without repeating old trials')
+    p.add_argument('--tapered-only', action='store_true', help='Run the 10 decreasing-width architectures at each requested dropout; no equal-width trials')
+    p.add_argument('--tapered-dropouts', type=float, nargs='+', default=None,
+                   help='For --tapered-only: dropout values to cross with all 10 architectures (default: 0.1)')
     p.add_argument('--trials', type=int, default=None, help='Total trial budget, including previous and failed trials')
     p.add_argument('--epochs', type=int, default=30)
     p.add_argument('--patience', type=int, default=10)
@@ -94,10 +108,16 @@ def main():
     p.add_argument('--search-seed', type=int, default=42)
     p.add_argument('--device', default=None)
     args = p.parse_args()
+    if args.tapered_dropouts is not None and not args.tapered_only:
+        p.error('--tapered-dropouts requires --tapered-only')
+    try:
+        queued = tapered_candidates(args.tapered_dropouts or [0.1]) if args.tapered_only else initial_candidates()
+    except ValueError as exc:
+        p.error(str(exc))
     if args.trials is None:
-        args.trials = 10 if args.tapered_only else 32
-    if args.tapered_only and args.trials > 10:
-        p.error('--tapered-only allows at most 10 trials, to avoid additional/repeated configurations')
+        args.trials = len(queued) if args.tapered_only else 32
+    if args.tapered_only and args.trials > len(queued):
+        p.error(f'--tapered-only allows at most {len(queued)} trials for the requested dropouts')
     if args.trials < 1 or args.epochs < 1 or args.patience < 0:
         p.error('Trials/epochs must be positive; patience must be nonnegative')
     import optuna
@@ -107,7 +127,7 @@ def main():
                Path(__file__).with_name('train_brainiac_attentive.py'),
                Path(__file__).with_name('attentive_search_adapter.py'), Path(__file__)]
     fingerprint = dict(inputs={str(f.resolve()): digest(f) for f in sources},
-                       space=SPACE, tapered_only=args.tapered_only, epochs=args.epochs, patience=args.patience,
+                       space=SPACE, tapered_only=args.tapered_only, queued_candidates=queued, epochs=args.epochs, patience=args.patience,
                        split_seed=args.split_seed, search_seed=args.search_seed,
                        device=args.device, python=sys.version, optuna=optuna.__version__)
     args.output.mkdir(parents=True, exist_ok=True)
@@ -124,8 +144,7 @@ def main():
         sampler=optuna.samplers.TPESampler(seed=args.search_seed, n_startup_trials=5),
         pruner=optuna.pruners.NopPruner())
     if not study.trials:
-        candidates = initial_candidates()[-10:] if args.tapered_only else initial_candidates()
-        for parameters in candidates:
+        for parameters in queued:
             study.enqueue_trial(parameters)
     # Resume completed trials, but never silently treat an interrupted training run as complete.
     if any(t.state == optuna.trial.TrialState.RUNNING for t in study.trials):
@@ -145,8 +164,8 @@ def main():
         (args.output/'run_selected_final.sh').write_text('#!/usr/bin/env bash\nset -euo pipefail\n' + shlex.join(final) + '\n')
 
     def objective(trial):
-        params = dict(lr=trial.suggest_float('lr', *SPACE['lr'], log=True),
-                      weight_decay=trial.suggest_float('weight_decay', *SPACE['weight_decay'], log=True),
+        params = dict(lr=trial.suggest_categorical('lr', SPACE['lr']),
+                      weight_decay=trial.suggest_categorical('weight_decay', SPACE['weight_decay']),
                       hidden_dim=trial.suggest_categorical('hidden_dim', SPACE['hidden_dim']),
                       drop_rate=trial.suggest_categorical('drop_rate', SPACE['drop_rate']),
                       mlp_dims=trial.suggest_categorical('mlp_dims', SPACE['mlp_dims']),

@@ -78,6 +78,22 @@ def main():
         for r in new:
             self.assertEqual(r['hidden_dim'],int(r['mlp_dims'].split(',')[0]))
 
+    def test_dropout_cross_product_without_duplicates(self):
+        configs = search.tapered_candidates([.1,.2,.3,.2])
+        self.assertEqual(len(configs),30)
+        expected = {(r['mlp_dims'], d) for r in search.initial_candidates()[-10:] for d in (.1,.2,.3)}
+        self.assertEqual({(r['mlp_dims'],r['drop_rate']) for r in configs},expected)
+        self.assertEqual(len(search.tapered_candidates([.2,.3])),20)
+        for bad in ([], [.4], [float('nan')]):
+            with self.assertRaises(ValueError): search.tapered_candidates(bad)
+
+    def test_optimizer_settings_fixed_for_every_configuration(self):
+        candidates = search.initial_candidates() + search.tapered_candidates([.1,.2,.3])
+        self.assertEqual({r['lr'] for r in candidates}, {0.0003})
+        self.assertEqual({r['weight_decay'] for r in candidates}, {0.05})
+        self.assertEqual(search.SPACE['lr'], [0.0003])
+        self.assertEqual(search.SPACE['weight_decay'], [0.05])
+
     def test_tapered_forwarding(self):
         import subprocess
         import sys

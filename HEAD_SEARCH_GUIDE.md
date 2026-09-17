@@ -148,3 +148,33 @@ limitation. best_params.json selects among these ten only, not the previous stud
 Compare its development results with the previous study before choosing finalists.
 Existing run_selected_final.sh would evaluate this study's winner, not a combined
 winner; do not run it until the cross-study development selection is complete.
+
+### Cross tapered heads with dropout
+
+Use `--tapered-only --tapered-dropouts 0.1 0.2 0.3` to queue all ten tapered
+architectures at each dropout: 30 unique configurations / 240 fold fits. Do not
+specify --trials unless intentionally limiting this list: the default automatically
+covers the full requested grid, with no subsequent adaptive/equal-width trials.
+Dropout is the outer loop, so trials 0–9 use 0.1, 10–19 use 0.2, and 20–29 use 0.3.
+All other settings remain as specified for the tapered-only run above.
+
+Use a new directory such as `results/head_search_tapered_dropout/88_132_split21`.
+If the ten dropout-0.1 tapered trials already finished, request only
+`--tapered-dropouts 0.2 0.3` (20 trials / 160 fold fits) to avoid repeating them.
+This does not import or auto-deduplicate results from other study directories.
+An already running search does not adopt these changes; wait before updating HPC
+scripts. Expanded studies require a new directory because the queue and provenance
+are different. Encoder tokens do not need re-extraction.
+
+### Fixed optimizer settings (current behavior)
+
+Learning rate and weight decay are now fixed for EVERY queued and adaptive
+configuration: lr=0.0003 and weight_decay=0.05. These are the original attentive
+trainer's defaults, not scikit-learn defaults or AdamW's library defaults.
+This supersedes earlier search ranges and tapered lr=0.0001 described above.
+The cosine learning-rate schedule remains active; 0.0003 is the starting LR.
+Both fixed values are retained in trial parameters and final-test commands.
+Use a new output directory (e.g. head_search_tapered_fixed/88_132_split21) since
+optimizer settings changed. Old results are preserved but are different experiments.
+The dropout-0.1 configurations from the old tapered lr=0.0001 run are not equivalent
+to dropout-0.1 at the new starting LR; include them when doing the fixed-LR comparison.
